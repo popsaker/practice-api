@@ -1,0 +1,110 @@
+{
+  "info": {
+    "_postman_id": "9f4b7d2e-7c3a-4e6d-9f21-6a8d3b5c1e47",
+    "name": "Practice API",
+    "description": "Postman collection for the Laravel Practice API.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080" },
+    { "key": "task_id", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "GET Task — first request",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/tasks/{{task_id}}"
+      }
+    },
+    {
+      "name": "GET Task — cached request",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/tasks/{{task_id}}"
+      }
+    },
+    {
+      "name": "PATCH Status — todo to in_progress",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"status\": \"in_progress\"\n}"
+        },
+        "url": "{{base_url}}/api/tasks/{{task_id}}/status"
+      }
+    },
+    {
+      "name": "PATCH Status — in_progress to done",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"status\": \"done\"\n}"
+        },
+        "url": "{{base_url}}/api/tasks/{{task_id}}/status"
+      }
+    },
+    {
+      "name": "PATCH Status — invalid done to todo",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"status\": \"todo\"\n}"
+        },
+        "url": "{{base_url}}/api/tasks/{{task_id}}/status"
+      }
+    },
+    {
+      "name": "PATCH Status — invalid status value",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"status\": \"cancelled\"\n}"
+        },
+        "url": "{{base_url}}/api/tasks/{{task_id}}/status"
+      }
+    },
+    {
+      "name": "GET Task — 404 not found",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/tasks/999"
+      }
+    },
+    {
+      "name": "GET Task — due_soon example",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/tasks/2"
+      }
+    },
+    {
+      "name": "GET Task — overdue example",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/tasks/3"
+      }
+    }
+  ]
+}
