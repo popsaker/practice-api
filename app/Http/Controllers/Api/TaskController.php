@@ -9,6 +9,73 @@ use Illuminate\Support\Facades\Cache;
 
 class TaskController extends Controller
 {
+    public function index(Request $request)
+    {
+        $validated = $request->validate([
+            'status' => ['nullable', 'in:todo,in_progress,done'],
+            'deadline_status' => ['nullable', 'in:overdue,due_soon,on_track'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $query = Task::query();
+
+        if (isset($validated['status'])) {
+            $query->where('status', $validated['status']);
+        }
+
+        if (isset($validated['deadline_status'])) {
+            $deadlineStatus = $validated['deadline_status'];
+
+            if ($deadlineStatus === 'overdue') {
+                $query->where('deadline', '<', now());
+            } elseif ($deadlineStatus === 'due_soon') {
+                $query->whereBetween('deadline', [
+                    now(),
+                    now()->addHours(24),
+                ]);
+            } elseif ($deadlineStatus === 'on_track') {
+                $query->where('deadline', '>', now()->addHours(24));
+            }
+        }
+
+        $perPage = $validated['per_page'] ?? 10;
+
+        $tasks = $query->paginate($perPage);
+
+        $tasks->getCollection()->transform(function ($task) {
+            $task->deadline_status = $this->calculateDeadlineStatus($task);
+
+            return $task;
+        });
+
+        return response()->json($tasks);
+    }
+
+    public function store(Request $request)
+    {
+        $validated = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'description' => ['nullable', 'string'],
+            'status' => ['nullable', 'in:todo,in_progress,done'],
+            'deadline' => ['required', 'date', 'after_or_equal:now'],
+        ]);
+
+        $task = new Task();
+
+        $task->title = $validated['title'];
+        $task->description = $validated['description'] ?? null;
+        $task->status = $validated['status'] ?? 'todo';
+        $task->deadline = $validated['deadline'];
+        $task->deadline_status = $this->calculateDeadlineStatus($task);
+
+        $task->save();
+
+        return response()->json([
+            'message' => 'Задача успешно создана',
+            'task' => $task,
+        ], 201);
+    }
+
     public function show(int $id)
     {
         $cacheKey = "task:{$id}";
@@ -20,17 +87,7 @@ class TaskController extends Controller
         } else {
             $taskModel = Task::findOrFail($id);
 
-            $deadline = $taskModel->deadline;
-
-            if ($deadline->isPast()) {
-                $deadlineStatus = 'overdue';
-            } elseif ($deadline->lessThanOrEqualTo(now()->addHours(24))) {
-                $deadlineStatus = 'due_soon';
-            } else {
-                $deadlineStatus = 'on_track';
-            }
-
-            $taskModel->deadline_status = $deadlineStatus;
+            $taskModel->deadline_status = $this->calculateDeadlineStatus($taskModel);
 
             $task = $taskModel->toArray();
 
@@ -72,6 +129,7 @@ class TaskController extends Controller
         }
 
         $task->status = $validated['status'];
+        $task->deadline_status = $this->calculateDeadlineStatus($task);
         $task->save();
 
         Cache::forget("task:{$id}");
@@ -81,5 +139,18 @@ class TaskController extends Controller
             'task' => $task,
             'cached' => false,
         ]);
+    }
+
+    private function calculateDeadlineStatus(Task $task): string
+    {
+        if ($task->deadline->isPast()) {
+            return 'overdue';
+        }
+
+        if ($task->deadline->lessThanOrEqualTo(now()->addHours(24))) {
+            return 'due_soon';
+        }
+
+        return 'on_track';
     }
 }
