@@ -1,8 +1,8 @@
 # Practice API
 
-REST API для управления задачами на Laravel 13.
+REST API для управления задачами на **Laravel 13**.
 
-Проект выполнен в Docker и предназначен для работы с задачами, статусами, дедлайнами, кэшированием, фильтрацией, пагинацией и авторизацией через Laravel Sanctum.
+Проект выполнен в Docker и предназначен для работы с задачами, статусами, дедлайнами, кэшированием, фильтрацией, пагинацией, авторизацией через Laravel Sanctum, Redis Queue и планировщиком задач Laravel.
 
 ## Стек
 
@@ -12,27 +12,60 @@ REST API для управления задачами на Laravel 13.
 * Nginx
 * Docker
 * Docker Compose
-* Laravel File Cache
+* Redis 7
 * Laravel Sanctum
 * PHPUnit
 
-Redis в проекте не используется. Для кэширования применяется файловый драйвер Laravel, что допускается условиями задания.
-
 ## Архитектура
 
-Проект состоит из трёх основных контейнеров:
+Проект состоит из следующих сервисов:
 
 ```text
 Client / Postman
-       ↓
+       |
+       v
     Nginx
-       ↓
+       |
+       v
     Laravel
-       ↓
+     /   \
+    v     v
+ MySQL   Redis
+          |
+          v
+      Queue Worker
+
+Laravel Scheduler
+       |
+       v
+Artisan Command
+       |
+       v
+Redis Queue
+       |
+       v
+      Job
+       |
+       v
     MySQL
 ```
 
-Кэширование выполняется средствами Laravel с использованием файлового драйвера.
+### Docker-сервисы
+
+| Сервис      | Назначение            |
+| ----------- | --------------------- |
+| `app`       | Laravel + PHP-FPM     |
+| `nginx`     | Web-сервер            |
+| `mysql`     | База данных MySQL 8.4 |
+| `redis`     | Кэш и очередь         |
+| `queue`     | Laravel Queue Worker  |
+| `scheduler` | Laravel Scheduler     |
+
+Nginx доступен с хоста на порту `8080`.
+
+MySQL доступен с хоста на порту `3307`.
+
+Redis используется внутри Docker-сети на порту `6379`.
 
 ## Запуск проекта
 
@@ -40,6 +73,7 @@ Client / Postman
 
 ```bash
 git clone <URL_РЕПОЗИТОРИЯ>
+
 cd practice-api
 ```
 
@@ -62,10 +96,25 @@ DB_USERNAME=practice
 DB_PASSWORD=practice_password
 ```
 
-Кэш:
+Настройки очереди:
 
 ```env
-CACHE_STORE=file
+QUEUE_CONNECTION=redis
+```
+
+Настройки кэша:
+
+```env
+CACHE_STORE=redis
+```
+
+Настройки Redis:
+
+```env
+REDIS_CLIENT=phpredis
+REDIS_HOST=redis
+REDIS_PASSWORD=null
+REDIS_PORT=6379
 ```
 
 ### 3. Запустить Docker
@@ -82,11 +131,16 @@ docker compose ps
 
 Должны быть запущены:
 
-* `practice-api-app`
-* `practice-api-nginx`
-* `practice-api-mysql`
+```text
+practice-api-app
+practice-api-nginx
+practice-api-mysql
+practice-api-redis
+practice-api-queue
+practice-api-scheduler
+```
 
-MySQL должен иметь статус `healthy`.
+MySQL и Redis должны иметь статус `healthy`.
 
 ### 4. Выполнить миграции и заполнить тестовые данные
 
@@ -94,7 +148,7 @@ MySQL должен иметь статус `healthy`.
 docker compose exec app php artisan migrate --seed
 ```
 
-Команда создаёт таблицы базы данных и три тестовые задачи.
+Команда создаёт таблицы базы данных и тестовые задачи.
 
 ### 5. Проверить API
 
@@ -109,19 +163,6 @@ http://localhost:8080
 ```http
 GET http://localhost:8080/api/tasks/1
 ```
-
-### Права на `storage`
-
-При запуске контейнера права Laravel автоматически настраиваются через Docker entrypoint.
-
-Дополнительный ручной `chmod` для:
-
-```text
-storage/
-bootstrap/cache/
-```
-
-не требуется.
 
 ## API
 
@@ -146,8 +187,10 @@ GET http://localhost:8080/api/tasks/1
         "title": "Тестовая задача",
         "description": "Проверка API",
         "status": "todo",
-        "deadline": "2026-09-19T12:24:58.000000Z",
-        "deadline_status": "overdue"
+        "deadline": "2026-10-01T12:00:00.000000Z",
+        "deadline_status": "on_track",
+        "created_at": "2026-09-28T12:00:00.000000Z",
+        "updated_at": "2026-09-28T12:00:00.000000Z"
     },
     "cached": false
 }
@@ -156,9 +199,7 @@ GET http://localhost:8080/api/tasks/1
 Поле `cached` показывает источник ответа:
 
 * `false` — данные получены из базы данных;
-* `true` — данные получены из кэша.
-
----
+* `true` — данные получены из кэша Redis.
 
 ### 2. Получение списка задач
 
@@ -221,8 +262,6 @@ GET http://localhost:8080/api/tasks?status=todo&deadline_status=on_track&per_pag
 
 При передаче недопустимого значения API возвращает HTTP `422`.
 
----
-
 ### 3. Создание задачи
 
 ```http
@@ -246,17 +285,21 @@ POST http://localhost:8080/api/tasks
 }
 ```
 
-Поле `title` обязательно.
+Правила:
 
-Поле `deadline` обязательно и не может находиться в прошлом.
+* `title` — обязательное поле;
+* `description` — необязательное поле;
+* `status` — необязательное поле;
+* `deadline` — обязательное поле;
+* `deadline` не может находиться в прошлом.
 
-Поле `status` необязательно. Если оно не передано, используется:
+Если `status` не передан, используется:
 
 ```text
 todo
 ```
 
-Допустимые значения:
+Допустимые значения `status`:
 
 ```text
 todo
@@ -282,8 +325,6 @@ done
 }
 ```
 
----
-
 ## Статус дедлайна
 
 Для каждой задачи рассчитывается `deadline_status`.
@@ -300,7 +341,7 @@ done
 
 До дедлайна осталось более 24 часов.
 
-Статус дедлайна рассчитывается на основе текущего времени.
+Статус рассчитывается на основе текущего времени.
 
 В базе данных поле `deadline_status` хранится в виде ENUM:
 
@@ -310,9 +351,11 @@ due_soon
 on_track
 ```
 
-## Кэширование
+## Кэширование Redis
 
-Результат GET-запроса конкретной задачи кэшируется на 60 секунд.
+Результат `GET /api/tasks/{id}` кэшируется на 60 секунд.
+
+Для кэширования используется Redis.
 
 Ключ кэша:
 
@@ -334,7 +377,7 @@ task:1
 }
 ```
 
-Повторный запрос в течение 60 секунд получает данные из кэша:
+Повторный запрос в течение 60 секунд получает данные из Redis:
 
 ```json
 {
@@ -344,19 +387,27 @@ task:1
 
 После успешного изменения статуса соответствующий кэш удаляется.
 
+Проверить работу Redis можно командой:
+
+```bash
+docker compose exec redis redis-cli ping
+```
+
+Ожидаемый результат:
+
+```text
+PONG
+```
+
 ## Изменение статуса
 
 ```http
 PATCH /api/tasks/{id}/status
 ```
 
-Данный endpoint защищён Laravel Sanctum.
+Endpoint защищён Laravel Sanctum.
 
-Без токена запрос возвращает:
-
-```text
-401 Unauthenticated
-```
+Без токена запрос возвращает HTTP `401`.
 
 Пример:
 
@@ -377,6 +428,13 @@ PATCH http://localhost:8080/api/tasks/1/status
 ```text
 Authorization: Bearer <TOKEN>
 ```
+
+После успешного изменения статуса:
+
+1. изменяется статус задачи;
+2. пересчитывается `deadline_status`;
+3. данные сохраняются в MySQL;
+4. кэш задачи удаляется.
 
 ## Авторизация
 
@@ -421,7 +479,25 @@ POST http://localhost:8080/api/login
 Authorization: Bearer <TOKEN>
 ```
 
----
+## Ограничение попыток входа
+
+Endpoint `/api/login` защищён ограничителем запросов:
+
+```text
+5 попыток в минуту
+```
+
+После превышения лимита API возвращает:
+
+```text
+429 Too Many Requests
+```
+
+Проверка реализована middleware:
+
+```php
+->middleware('throttle:5,1');
+```
 
 ## Переходы статусов
 
@@ -461,9 +537,156 @@ done → todo
 }
 ```
 
-После успешного изменения статуса кэш задачи удаляется.
+## Автоматическая обработка просроченных задач
 
----
+Для обработки задач, срок которых истёк, реализована Artisan-команда:
+
+```text
+app:check-overdue-tasks
+```
+
+Запуск вручную:
+
+```bash
+docker compose exec app php artisan app:check-overdue-tasks
+```
+
+Команда:
+
+1. ищет задачи с прошедшим дедлайном;
+2. проверяет, что они ещё не имеют `deadline_status = overdue`;
+3. изменяет `deadline_status` на `overdue`;
+4. отправляет `TaskBecameOverdueJob` в Redis Queue.
+
+Пример сообщения:
+
+```text
+Задача #4 стала просроченной. Job отправлен в Redis.
+```
+
+### Redis Queue
+
+Очередь использует:
+
+```env
+QUEUE_CONNECTION=redis
+```
+
+Отдельный контейнер выполняет Queue Worker:
+
+```text
+practice-api-queue
+```
+
+Команда Worker:
+
+```bash
+php artisan queue:work redis --sleep=1 --tries=3
+```
+
+Job:
+
+```text
+App\Jobs\TaskBecameOverdueJob
+```
+
+Job создаёт запись в таблице:
+
+```text
+task_overdue_logs
+```
+
+Таким образом, цепочка обработки выглядит следующим образом:
+
+```text
+Scheduler
+    ↓
+app:check-overdue-tasks
+    ↓
+Redis Queue
+    ↓
+TaskBecameOverdueJob
+    ↓
+task_overdue_logs
+```
+
+## Планировщик Laravel
+
+Команда проверки просроченных задач запускается автоматически каждую минуту.
+
+Настройка находится в:
+
+```text
+routes/console.php
+```
+
+Используется:
+
+```php
+Schedule::command('app:check-overdue-tasks')->everyMinute();
+```
+
+Отдельный контейнер:
+
+```text
+practice-api-scheduler
+```
+
+запускает:
+
+```bash
+php artisan schedule:work
+```
+
+Проверить зарегистрированные задачи можно:
+
+```bash
+docker compose exec app php artisan schedule:list
+```
+
+Ожидаемая задача:
+
+```text
+* * * * *  php artisan app:check-overdue-tasks
+```
+
+## Таблица `task_overdue_logs`
+
+Для фиксации перехода задачи в состояние `overdue` создана таблица:
+
+```text
+task_overdue_logs
+```
+
+Структура:
+
+| Поле         | Тип       | Описание             |
+| ------------ | --------- | -------------------- |
+| `id`         | BIGINT    | Идентификатор записи |
+| `task_id`    | BIGINT    | Идентификатор задачи |
+| `created_at` | TIMESTAMP | Дата создания        |
+| `updated_at` | TIMESTAMP | Дата изменения       |
+
+Для `task_id` используется внешний ключ на таблицу `tasks`.
+
+Также установлен `unique` на `task_id`, поэтому одна задача не создаёт несколько одинаковых записей о переходе в `overdue`.
+
+## TaskResource
+
+Для формирования API-ответов используется Laravel API Resource:
+
+```text
+app/Http/Resources/TaskResource.php
+```
+
+`TaskResource` используется для:
+
+* `GET /api/tasks`;
+* `GET /api/tasks/{id}`;
+* `POST /api/tasks`;
+* `PATCH /api/tasks/{id}/status`.
+
+Resource централизует формат представления задачи в API.
 
 ## Валидация
 
@@ -501,8 +724,6 @@ API возвращает:
 422 Unprocessable Content
 ```
 
----
-
 ## Обработка ошибок
 
 ### Задача не найдена
@@ -532,7 +753,7 @@ Authorization: Bearer <TOKEN>
 возвращает:
 
 ```text
-401 Unauthenticated
+401 Unauthorized
 ```
 
 ### Неверные входные данные
@@ -543,15 +764,13 @@ Authorization: Bearer <TOKEN>
 422 Unprocessable Content
 ```
 
-### Запрещённый переход статуса
+### Превышение лимита входа
 
-Возвращается:
+После более чем пяти попыток авторизации в течение минуты:
 
 ```text
-422 Unprocessable Content
+429 Too Many Requests
 ```
-
----
 
 ## Структура таблицы `tasks`
 
@@ -584,7 +803,7 @@ on_track
 
 ## Seeder
 
-Для проекта создан `TaskSeeder`, который создаёт три тестовые задачи:
+Для проекта создан `TaskSeeder`, который создаёт тестовые задачи:
 
 | ID | Название        | Дедлайн       |
 | -- | --------------- | ------------- |
@@ -633,12 +852,14 @@ http://localhost:8080
 * пагинации;
 * создания задачи;
 * авторизации;
+* ограничения попыток входа;
 * изменения статуса;
 * очистки кэша после изменения;
 * запрещённого перехода `done → todo`;
 * валидации;
 * ошибки `404`;
 * ошибки `401`;
+* ошибки `429`;
 * статусов `due_soon` и `overdue`.
 
 ## Автоматические тесты
@@ -654,7 +875,7 @@ docker compose exec app php artisan test
 Тесты проверяют:
 
 * получение задачи;
-* использование кэша;
+* использование Redis-кэша;
 * ошибку `404`;
 * создание задачи;
 * валидацию `title`;
@@ -663,98 +884,133 @@ docker compose exec app php artisan test
 * доступ к PATCH с токеном;
 * запрещённый переход `done → todo`;
 * очистку кэша после изменения статуса;
-* получение Sanctum-токена.
+* получение Sanctum-токена;
+* ограничение попыток входа;
+* выполнение `TaskBecameOverdueJob`;
+* постановку Job в очередь;
+* фильтрацию задач;
+* пагинацию.
 
 Текущий результат:
 
 ```text
-Tests: 12 passed (43 assertions)
+Tests: 19 passed (64 assertions)
 ```
 
 ## API-маршруты
 
 ```text
 POST  /api/login
-
 GET   /api/tasks
 POST  /api/tasks
 GET   /api/tasks/{id}
-
 PATCH /api/tasks/{id}/status
 ```
 
 `PATCH /api/tasks/{id}/status` требует авторизацию через Sanctum.
 
+`POST /api/login` ограничен пятью попытками в минуту.
+
 ## Основные файлы
 
-Контроллер:
+### Контроллер задач
 
 ```text
 app/Http/Controllers/Api/TaskController.php
 ```
 
-Контроллер авторизации:
+### Контроллер авторизации
 
 ```text
 app/Http/Controllers/Api/AuthController.php
 ```
 
-Модель задачи:
+### API Resource
+
+```text
+app/Http/Resources/TaskResource.php
+```
+
+### Модель задачи
 
 ```text
 app/Models/Task.php
 ```
 
-Модель пользователя:
+### Модель пользователя
 
 ```text
 app/Models/User.php
 ```
 
-Маршруты:
+### Модель журнала просрочек
+
+```text
+app/Models/TaskOverdueLog.php
+```
+
+### Job
+
+```text
+app/Jobs/TaskBecameOverdueJob.php
+```
+
+### Artisan-команда
+
+```text
+app/Console/Commands/CheckOverdueTasks.php
+```
+
+### Маршруты API
 
 ```text
 routes/api.php
 ```
 
-Миграция задач:
+### Планировщик
+
+```text
+routes/console.php
+```
+
+### Миграция задач
 
 ```text
 database/migrations/*_create_tasks_table.php
 ```
 
-Seeder:
+### Миграция журнала просрочек
+
+```text
+database/migrations/2026_09_28_161530_create_task_overdue_logs_table.php
+```
+
+### Seeder
 
 ```text
 database/seeders/TaskSeeder.php
 ```
 
-Feature-тесты:
+### Feature-тесты
 
 ```text
 tests/Feature/TaskApiTest.php
 ```
 
-Docker entrypoint:
-
-```text
-docker/entrypoint.sh
-```
-
-Docker-конфигурация:
+### Docker-конфигурация
 
 ```text
 Dockerfile
 compose.yaml
 ```
 
-Nginx:
+### Nginx
 
 ```text
 nginx/default.conf
 ```
 
-Postman:
+### Postman
 
 ```text
 Practice_API.postman_collection.json
@@ -780,7 +1036,14 @@ DB_DATABASE=practice
 DB_USERNAME=practice
 DB_PASSWORD=practice_password
 
-CACHE_STORE=file
+CACHE_STORE=redis
+
+QUEUE_CONNECTION=redis
+
+REDIS_CLIENT=phpredis
+REDIS_HOST=redis
+REDIS_PASSWORD=null
+REDIS_PORT=6379
 ```
 
 ## Полезные Docker-команды
@@ -803,6 +1066,12 @@ docker compose up -d --build
 docker compose down
 ```
 
+### Остановка с удалением томов
+
+```bash
+docker compose down -v
+```
+
 ### Просмотр контейнеров
 
 ```bash
@@ -813,6 +1082,24 @@ docker compose ps
 
 ```bash
 docker compose logs app
+```
+
+### Логи Queue Worker
+
+```bash
+docker compose logs queue
+```
+
+### Логи Scheduler
+
+```bash
+docker compose logs scheduler
+```
+
+### Логи Redis
+
+```bash
+docker compose logs redis
 ```
 
 ### Вход в контейнер Laravel
@@ -833,6 +1120,24 @@ docker compose exec app php artisan optimize:clear
 docker compose exec app php artisan route:list --path=api
 ```
 
+### Просмотр задач Scheduler
+
+```bash
+docker compose exec app php artisan schedule:list
+```
+
+### Ручной запуск проверки просроченных задач
+
+```bash
+docker compose exec app php artisan app:check-overdue-tasks
+```
+
+### Проверка Redis
+
+```bash
+docker compose exec redis redis-cli ping
+```
+
 ### Запуск тестов
 
 ```bash
@@ -846,6 +1151,10 @@ docker compose exec app php artisan test
 * [x] Laravel запущен в Docker
 * [x] Nginx используется как web-сервер
 * [x] MySQL используется как база данных
+* [x] Redis используется для кэширования
+* [x] Redis используется как Queue Driver
+* [x] Queue Worker работает в отдельном контейнере
+* [x] Laravel Scheduler работает в отдельном контейнере
 * [x] REST API
 * [x] `GET /api/tasks/{id}`
 * [x] `GET /api/tasks`
@@ -860,20 +1169,28 @@ docker compose exec app php artisan test
 * [x] кэширование GET-запроса
 * [x] TTL кэша 60 секунд
 * [x] информация о попадании в кэш
+* [x] очистка кэша после изменения статуса
 * [x] `PATCH /api/tasks/{id}/status`
 * [x] валидация статуса
 * [x] проверка переходов статусов
 * [x] запрет `done → todo`
-* [x] очистка кэша после изменения статуса
 * [x] Laravel Sanctum
 * [x] `POST /api/login`
 * [x] защита PATCH через Sanctum
 * [x] обработка `401`
+* [x] ограничение входа до 5 попыток в минуту
 * [x] обработка `404`
 * [x] обработка `422`
-* [x] автоматические Feature-тесты
+* [x] обработка `429`
+* [x] `TaskResource`
+* [x] Artisan-команда `app:check-overdue-tasks`
+* [x] автоматическая проверка просроченных задач
+* [x] `TaskBecameOverdueJob`
+* [x] отправка Job в Redis Queue
+* [x] обработка Job Queue Worker
+* [x] запись результата Job в `task_overdue_logs`
+* [x] автоматический запуск команды через Scheduler
+* [x] Feature-тесты
 * [x] Postman Collection
 * [x] Seeder с тестовыми данными
-* [x] Docker entrypoint для автоматической настройки прав
-* [x] отсутствие необходимости ручного `chmod`
 * [x] README с инструкцией по запуску

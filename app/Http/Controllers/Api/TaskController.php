@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Resources\TaskResource;
 use App\Models\Task;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -48,7 +49,7 @@ class TaskController extends Controller
             return $task;
         });
 
-        return response()->json($tasks);
+        return TaskResource::collection($tasks);
     }
 
     public function store(Request $request)
@@ -72,7 +73,7 @@ class TaskController extends Controller
 
         return response()->json([
             'message' => 'Задача успешно создана',
-            'task' => $task,
+            'task' => new TaskResource($task),
         ], 201);
     }
 
@@ -83,23 +84,31 @@ class TaskController extends Controller
         $cached = Cache::has($cacheKey);
 
         if ($cached) {
-            $task = Cache::get($cacheKey);
+            $cachedTask = Cache::get($cacheKey);
+
+            $task = new Task();
+
+            $task->setRawAttributes($cachedTask['attributes']);
+            $task->exists = true;
+
+            $task->setRelations($cachedTask['relations'] ?? []);
         } else {
-            $taskModel = Task::findOrFail($id);
+            $task = Task::findOrFail($id);
 
-            $taskModel->deadline_status = $this->calculateDeadlineStatus($taskModel);
-
-            $task = $taskModel->toArray();
+            $task->deadline_status = $this->calculateDeadlineStatus($task);
 
             Cache::put(
                 $cacheKey,
-                $task,
+                [
+                    'attributes' => $task->getAttributes(),
+                    'relations' => $task->getRelations(),
+                ],
                 now()->addSeconds(60)
             );
         }
 
         return response()->json([
-            'task' => $task,
+            'task' => new TaskResource($task),
             'cached' => $cached,
         ]);
     }
@@ -136,7 +145,7 @@ class TaskController extends Controller
 
         return response()->json([
             'message' => 'Статус задачи успешно изменён',
-            'task' => $task,
+            'task' => new TaskResource($task),
             'cached' => false,
         ]);
     }

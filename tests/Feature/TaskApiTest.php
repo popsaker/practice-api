@@ -2,10 +2,13 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\TaskBecameOverdueJob;
 use App\Models\Task;
 use App\Models\User;
+use App\Models\TaskOverdueLog;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class TaskApiTest extends TestCase
@@ -218,6 +221,103 @@ class TaskApiTest extends TestCase
             ->assertJsonPath('task.status', 'in_progress');
     }
 
+    public function test_patch_nonexistent_task_returns_404(): void
+    {
+        $user = User::factory()->create();
+
+        $token = $user->createToken('test-token')->plainTextToken;
+
+        $response = $this
+            ->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson(
+                '/api/tasks/99999/status',
+                ['status' => 'done']
+            );
+
+        $response->assertStatus(404);
+    }
+
+    public function test_patch_with_invalid_status_returns_422(): void
+    {
+        $user = User::factory()->create();
+
+        $task = Task::create([
+            'title' => 'Тестовая задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->addDays(3),
+            'deadline_status' => 'on_track',
+        ]);
+
+        $token = $user->createToken('test-token')->plainTextToken;
+
+        $response = $this
+            ->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson(
+                "/api/tasks/{$task->id}/status",
+                ['status' => 'invalid_status']
+            );
+
+        $response
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['status']);
+    }
+
+    public function test_tasks_index_supports_status_filter_and_pagination(): void
+    {
+        Task::create([
+            'title' => 'Todo задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->addDays(3),
+            'deadline_status' => 'on_track',
+        ]);
+
+        Task::create([
+            'title' => 'Done задача',
+            'description' => null,
+            'status' => 'done',
+            'deadline' => now()->addDays(3),
+            'deadline_status' => 'on_track',
+        ]);
+
+        $response = $this->getJson('/api/tasks?status=todo&per_page=1');
+
+        $response
+            ->assertStatus(200)
+            ->assertJsonPath('meta.per_page', 1)
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.status', 'todo');
+    }
+
+    public function test_tasks_index_supports_deadline_status_filter(): void
+    {
+        Task::create([
+            'title' => 'Просроченная задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->subHour(),
+            'deadline_status' => 'on_track',
+        ]);
+
+        Task::create([
+            'title' => 'Актуальная задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->addDays(3),
+            'deadline_status' => 'on_track',
+        ]);
+
+        $response = $this->getJson('/api/tasks?deadline_status=overdue');
+
+        $response
+            ->assertStatus(200)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.title', 'Просроченная задача')
+            ->assertJsonPath('data.0.deadline_status', 'overdue');
+    }
+
     public function test_login_returns_sanctum_token(): void
     {
         $user = User::factory()->create([
@@ -239,5 +339,61 @@ class TaskApiTest extends TestCase
                 'token',
                 'user',
             ]);
+    }
+
+    public function test_login_rate_limit_returns_429_after_five_attempts(): void
+    {
+        for ($i = 0; $i < 5; $i++) {
+            $this->postJson('/api/login', [
+                'email' => 'login@example.com',
+                'password' => 'wrong-password',
+            ])->assertStatus(401);
+        }
+
+        $response = $this->postJson('/api/login', [
+            'email' => 'login@example.com',
+            'password' => 'wrong-password',
+        ]);
+
+        $response->assertStatus(429);
+    }
+
+    public function test_overdue_job_creates_log(): void
+    {
+        $task = Task::create([
+            'title' => 'Просроченная задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->subHour(),
+            'deadline_status' => 'overdue',
+        ]);
+
+        (new TaskBecameOverdueJob($task->id))->handle();
+
+        $this->assertDatabaseHas('task_overdue_logs', [
+            'task_id' => $task->id,
+        ]);
+    }
+
+    public function test_overdue_job_can_be_dispatched_to_queue(): void
+    {
+        Queue::fake();
+
+        $task = Task::create([
+            'title' => 'Просроченная задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->subHour(),
+            'deadline_status' => 'on_track',
+        ]);
+
+        TaskBecameOverdueJob::dispatch($task->id);
+
+        Queue::assertPushed(
+            TaskBecameOverdueJob::class,
+            function (TaskBecameOverdueJob $job) use ($task): bool {
+                return $job->taskId === $task->id;
+            }
+        );
     }
 }
