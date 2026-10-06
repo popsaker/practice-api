@@ -77,39 +77,28 @@ class TaskController extends Controller
         ], 201);
     }
 
-    public function show(int $id)
+    public function show(Request $request, int $id)
     {
         $cacheKey = "task:{$id}";
+        $cachedTask = Cache::get($cacheKey);
 
-        $cached = Cache::has($cacheKey);
-
-        if ($cached) {
-            $cachedTask = Cache::get($cacheKey);
-
-            $task = new Task();
-
-            $task->setRawAttributes($cachedTask['attributes']);
-            $task->exists = true;
-
-            $task->setRelations($cachedTask['relations'] ?? []);
-        } else {
-            $task = Task::findOrFail($id);
-
-            $task->deadline_status = $this->calculateDeadlineStatus($task);
-
-            Cache::put(
-                $cacheKey,
-                [
-                    'attributes' => $task->getAttributes(),
-                    'relations' => $task->getRelations(),
-                ],
-                now()->addSeconds(60)
-            );
+        if ($cachedTask !== null) {
+            return response()->json([
+                'task' => $cachedTask,
+                'cached' => true,
+            ]);
         }
 
+        $task = Task::findOrFail($id);
+        $task->deadline_status = $this->calculateDeadlineStatus($task);
+
+        $taskData = (new TaskResource($task))->resolve($request);
+
+        Cache::put($cacheKey, $taskData, now()->addSeconds(60));
+
         return response()->json([
-            'task' => new TaskResource($task),
-            'cached' => $cached,
+            'task' => $taskData,
+            'cached' => false,
         ]);
     }
 

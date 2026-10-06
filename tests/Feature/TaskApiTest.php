@@ -358,21 +358,94 @@ class TaskApiTest extends TestCase
         $response->assertStatus(429);
     }
 
-    public function test_overdue_job_creates_log(): void
+    public function test_overdue_job_marks_task_overdue_and_creates_log(): void
     {
         $task = Task::create([
             'title' => 'Просроченная задача',
             'description' => null,
             'status' => 'todo',
             'deadline' => now()->subHour(),
-            'deadline_status' => 'overdue',
+            'deadline_status' => 'on_track',
         ]);
 
         (new TaskBecameOverdueJob($task->id))->handle();
 
+        $this->assertDatabaseHas('tasks', [
+            'id' => $task->id,
+            'deadline_status' => 'overdue',
+        ]);
+
         $this->assertDatabaseHas('task_overdue_logs', [
             'task_id' => $task->id,
         ]);
+    }
+
+
+    public function test_overdue_command_dispatches_job_for_task_with_past_deadline_regardless_of_deadline_status(): void
+    {
+        Queue::fake();
+
+        $task = Task::create([
+            'title' => 'Просроченная задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->subHour(),
+            'deadline_status' => 'on_track',
+        ]);
+
+        $this->artisan('app:check-overdue-tasks')
+            ->assertExitCode(0)
+            ->expectsOutput("Задача #{$task->id}: Job отправлен в Redis.");
+
+        Queue::assertPushed(TaskBecameOverdueJob::class, function (TaskBecameOverdueJob $job) use ($task): bool {
+            return $job->taskId === $task->id;
+        });
+
+        $this->assertDatabaseHas('tasks', [
+            'id' => $task->id,
+            'deadline_status' => 'on_track',
+        ]);
+    }
+
+    public function test_overdue_command_does_not_dispatch_job_when_log_already_exists(): void
+    {
+        Queue::fake();
+
+        $task = Task::create([
+            'title' => 'Уже обработанная задача',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->subHour(),
+            'deadline_status' => 'overdue',
+        ]);
+
+        TaskOverdueLog::create(['task_id' => $task->id]);
+
+        $this->artisan('app:check-overdue-tasks')
+            ->assertExitCode(0)
+            ->expectsOutput('Новых просроченных задач не найдено.');
+
+        Queue::assertNothingPushed();
+    }
+
+    public function test_overdue_command_dispatches_for_task_even_when_deadline_status_is_already_overdue_without_log(): void
+    {
+        Queue::fake();
+
+        $task = Task::create([
+            'title' => 'Просроченная без лога',
+            'description' => null,
+            'status' => 'todo',
+            'deadline' => now()->subHour(),
+            'deadline_status' => 'overdue',
+        ]);
+
+        $this->artisan('app:check-overdue-tasks')
+            ->assertExitCode(0);
+
+        Queue::assertPushed(TaskBecameOverdueJob::class, function (TaskBecameOverdueJob $job) use ($task): bool {
+            return $job->taskId === $task->id;
+        });
     }
 
     public function test_overdue_job_can_be_dispatched_to_queue(): void

@@ -4,10 +4,10 @@ namespace App\Console\Commands;
 
 use App\Jobs\TaskBecameOverdueJob;
 use App\Models\Task;
-use App\Models\TaskOverdueLog;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
+use Throwable;
 
 #[Signature('app:check-overdue-tasks')]
 #[Description('Checks overdue tasks and dispatches jobs to Redis queue')]
@@ -17,28 +17,33 @@ class CheckOverdueTasks extends Command
     {
         $tasks = Task::query()
             ->where('deadline', '<', now())
-            ->where('deadline_status', '!=', 'overdue')
+            ->whereDoesntHave('overdueLog')
             ->get();
 
         if ($tasks->isEmpty()) {
-            $this->info('Просроченных новых задач не найдено.');
+            $this->info('Новых просроченных задач не найдено.');
 
             return self::SUCCESS;
         }
 
-        foreach ($tasks as $task) {
-            $task->deadline_status = 'overdue';
-            $task->save();
+        $hasFailures = false;
 
-            if (!TaskOverdueLog::where('task_id', $task->id)->exists()) {
+        foreach ($tasks as $task) {
+            try {
                 TaskBecameOverdueJob::dispatch($task->id);
 
                 $this->info(
-                    "Задача #{$task->id} стала просроченной. Job отправлен в Redis."
+                    "Задача #{$task->id}: Job отправлен в Redis."
+                );
+            } catch (Throwable $e) {
+                $hasFailures = true;
+
+                $this->error(
+                    "Задача #{$task->id}: не удалось отправить Job в очередь: {$e->getMessage()}"
                 );
             }
         }
 
-        return self::SUCCESS;
+        return $hasFailures ? self::FAILURE : self::SUCCESS;
     }
 }

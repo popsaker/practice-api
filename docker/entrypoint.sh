@@ -2,17 +2,27 @@
 
 set -e
 
-echo "Fixing Laravel permissions..."
+mkdir -p \
+    /var/www/storage/framework/cache \
+    /var/www/storage/framework/sessions \
+    /var/www/storage/framework/views \
+    /var/www/storage/logs \
+    /var/www/bootstrap/cache
 
-mkdir -p /var/www/storage/framework/cache
-mkdir -p /var/www/storage/framework/sessions
-mkdir -p /var/www/storage/framework/views
-mkdir -p /var/www/storage/logs
-mkdir -p /var/www/bootstrap/cache
+chown -R www-data:www-data \
+    /var/www/storage \
+    /var/www/bootstrap/cache \
+    /var/www/vendor
 
-chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
-chmod -R ug+rwX /var/www/storage /var/www/bootstrap/cache
+chmod -R ug+rwX \
+    /var/www/storage \
+    /var/www/bootstrap/cache
 
-echo "Laravel permissions are ready."
-
-exec "$@"
+case "$1" in
+    php-fpm|php-fpm*)
+        exec "$@"
+        ;;
+    *)
+        exec gosu www-data "$@"
+        ;;
+esac

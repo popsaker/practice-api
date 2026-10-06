@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Task extends Model
 {
@@ -17,4 +18,9 @@ class Task extends Model
     protected $casts = [
         'deadline' => 'datetime',
     ];
+
+    public function overdueLog(): HasOne
+    {
+        return $this->hasOne(TaskOverdueLog::class);
+    }
 }
