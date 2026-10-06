@@ -18,6 +18,10 @@ chmod -R ug+rwX \
     /var/www/storage \
     /var/www/bootstrap/cache
 
+if [ "$1" = "php" ] && [ "$2" = "artisan" ] && [ "$3" = "key:generate" ]; then
+    exec "$@"
+fi
+
 case "$1" in
     php-fpm|php-fpm*)
         exec "$@"

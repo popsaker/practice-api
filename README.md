@@ -179,7 +179,10 @@ PONG
 1. создаёт необходимые каталоги Laravel;
 2. назначает `www-data` владельцем `storage`, `bootstrap/cache` и `vendor`;
 3. выдаёт группе права на запись;
-4. запускает PHP-FPM, queue worker или scheduler от имени `www-data`.
+4. запускает PHP-FPM с master-процессом от root, а worker-процессы PHP-FPM работают от `www-data`;
+5. запускает queue worker и scheduler от имени `www-data`.
+
+Команда `php artisan key:generate` выполняется от root, чтобы она могла записать `APP_KEY` в `.env`.
 
 Поэтому queue и scheduler не создают root-owned Laravel-логи.
 
